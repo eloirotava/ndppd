@@ -1,30 +1,26 @@
-mod address;
-
-use address::Address;
-use std::net::Ipv6Addr;
-use std::str::FromStr;
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    // Inicializa o sistema de log
-    tracing_subscriber::fmt::init();
-    tracing::info!("Iniciando ndppd-rs...");
-
-    // Simulando o arquivo de configuração (ndppd.conf)
-    let regra_subnet = Address::new("1234:5678::/96")?;
-    let regra_ip_unico = Address::new("2001:db8::1")?; // Assume /128
-
-    println!("Regra 1: {} (Prefixo: {})", regra_subnet, regra_subnet.prefix());
-    println!("Regra 2: {} (Prefixo: {})", regra_ip_unico, regra_ip_unico.prefix());
-
-    // Simulando a chegada de um pacote Neighbor Solicitation buscando o IP 1234:5678::1
-    let target_ip = Ipv6Addr::from_str("1234:5678::1")?;
+// --- SIMULAÇÃO DE TRÁFEGO ---
     
-    if regra_subnet.contains(&target_ip) {
-        println!("O IP {} pertence à regra {}! O proxy deve responder.", target_ip, regra_subnet);
-    } else {
-        println!("O IP {} NÃO pertence à regra {}.", target_ip, regra_subnet);
-    }
+    let target_ip = Ipv6Addr::from_str("1234:5678::9999")?;
+    println!("\n[>] 1. Recebido Neighbor Solicitation para: {}", target_ip);
 
-    Ok(())
-}
+    if let Some(rule) = my_proxy.find_rule(&target_ip).cloned() {
+        println!("[!] Match encontrado! Regra: {}", rule.addr);
+        
+        // Criamos a sessão pendente (status: Waiting)
+        let session = my_proxy.get_or_create_session(target_ip);
+        println!("[-] Sessão criada: {:#?}", session);
+        
+        // Simulação: Enviamos o pacote para a eth1 e esperamos...
+        // ... (100ms depois) recebemos a resposta (Neighbor Advert) da eth1!
+        
+        println!("\n[>] 2. Resposta (Neighbor Advert) recebida da interface eth1!");
+        
+        // Recuperamos a sessão e marcamos como válida!
+        if let Some(active_session) = my_proxy.sessions.get_mut(&target_ip) {
+            active_session.mark_valid(my_proxy.ttl_ms as u64);
+            println!("[+] Sessão atualizada para VÁLIDA: {:#?}", active_session);
+        }
+
+    } else {
+        println!("[-] Nenhuma regra cobre o IP {}. Ignorando.", target_ip);
+    }
