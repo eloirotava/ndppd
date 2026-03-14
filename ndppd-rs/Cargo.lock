@@ -27,6 +27,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
+name = "classic_bpf"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "924f707d14cfb038745c9ee7334d96ae2cfc3d77b1441d3c782172c9107709b7"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "errno"
 version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -85,7 +94,9 @@ name = "ndppd-rs"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "classic_bpf",
  "ipnet",
+ "libc",
  "tokio",
  "tracing",
  "tracing-subscriber",
