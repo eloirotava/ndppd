@@ -1,4 +1,32 @@
-// --- SIMULAÇÃO DE TRÁFEGO ---
+mod address;
+mod rule;
+mod session;
+mod proxy;
+mod config; // Adicionámos o novo módulo!
+
+use std::net::Ipv6Addr;
+use std::str::FromStr;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt::init();
+    tracing::info!("Iniciando ndppd-rs...");
+
+    // Lê as regras diretamente do ficheiro ndppd.conf
+    let mut proxies = config::parse_config("ndppd.conf")?;
+
+    if proxies.is_empty() {
+        tracing::error!("Nenhum proxy foi encontrado no ficheiro de configuração!");
+        return Ok(());
+    }
+
+    // Vamos buscar o primeiro proxy configurado (o eth0)
+    let my_proxy = &mut proxies[0];
+
+    println!("Proxy carregado da interface: {}", my_proxy.iface_name);
+    println!("Regras carregadas do ficheiro: {:#?}", my_proxy.rules);
+
+    // --- SIMULAÇÃO DE TRÁFEGO ---
     
     let target_ip = Ipv6Addr::from_str("1234:5678::9999")?;
     println!("\n[>] 1. Recebido Neighbor Solicitation para: {}", target_ip);
@@ -6,21 +34,20 @@
     if let Some(rule) = my_proxy.find_rule(&target_ip).cloned() {
         println!("[!] Match encontrado! Regra: {}", rule.addr);
         
-        // Criamos a sessão pendente (status: Waiting)
         let session = my_proxy.get_or_create_session(target_ip);
-        println!("[-] Sessão criada: {:#?}", session);
+        println!("[-] Sessão criada com timeout de {}ms: {:#?}", my_proxy.timeout_ms, session);
         
-        // Simulação: Enviamos o pacote para a eth1 e esperamos...
-        // ... (100ms depois) recebemos a resposta (Neighbor Advert) da eth1!
+        println!("\n[>] 2. Resposta (Neighbor Advert) recebida!");
         
-        println!("\n[>] 2. Resposta (Neighbor Advert) recebida da interface eth1!");
-        
-        // Recuperamos a sessão e marcamos como válida!
         if let Some(active_session) = my_proxy.sessions.get_mut(&target_ip) {
-            active_session.mark_valid(my_proxy.ttl_ms as u64);
-            println!("[+] Sessão atualizada para VÁLIDA: {:#?}", active_session);
+            let ttl = my_proxy.ttl_ms as u64;
+            active_session.mark_valid(ttl);
+            println!("[+] Sessão atualizada para VÁLIDA (dura {}ms): {:#?}", ttl, active_session);
         }
 
     } else {
-        println!("[-] Nenhuma regra cobre o IP {}. Ignorando.", target_ip);
+        println!("[-] Nenhuma regra cobre o IP {}. Ignorando pacote.", target_ip);
     }
+
+    Ok(())
+}
