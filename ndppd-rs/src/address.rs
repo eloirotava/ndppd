@@ -1,7 +1,7 @@
 use ipnet::Ipv6Net;
 use std::net::Ipv6Addr;
 use std::str::FromStr;
-use anyhow::{Result, bail};
+use anyhow::Result;
 
 /// Representa um endereço IPv6 ou uma sub-rede (regra) do ndppd
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
