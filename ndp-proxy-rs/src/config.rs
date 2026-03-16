@@ -25,7 +25,7 @@ pub fn load_config(path: &str) -> AppConfig {
     for (sec, prop) in conf.iter() {
         let name: String = match sec {
             Some(s) if !s.trim().is_empty() => s.trim().to_string(),
-            _ => continue, // Ignora seções vazias ou nulas
+            _ => continue,
         };
         
         if name == "general" {
@@ -58,8 +58,10 @@ fn parse_ipv4_cidr(input: &str) -> (String, String) {
     let parts: Vec<&str> = input.split('/').collect();
     let addr = parts[0].trim().to_string();
     let prefix = if parts.len() > 1 { parts[1].trim().parse::<u8>().unwrap_or(24) } else { 24 };
-    let mask = if prefix == 0 { 0 } else { !0u32 << (32 - prefix) };
-    let mask_addr = Ipv4Addr::from(mask.to_be());
+    
+    // CORREÇÃO: Removido .to_be(). O Ipv4Addr::from(u32) já espera a ordem correta do host.
+    let mask = if prefix == 0 { 0 } else { 0xffffffffu32 << (32 - prefix) };
+    let mask_addr = Ipv4Addr::from(mask); 
     (addr, mask_addr.to_string())
 }
 

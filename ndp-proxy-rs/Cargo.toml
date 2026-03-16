@@ -16,3 +16,11 @@ rust-ini = "0.21"
 pnet = "0.34"
 anyhow = "1.0"
 futures = "0.3"
+
+# --- ADICIONE ESTA SEÇÃO ABAIXO ---
+[profile.release]
+opt-level = 'z'     # Otimiza agressivamente para tamanho (z é menor que s)
+lto = true          # Link Time Optimization: remove código morto entre crates
+codegen-units = 1   # Melhora a otimização ao processar tudo como uma única unidade
+panic = 'abort'     # Remove a infraestrutura de stack unwinding (gera binários menores)
+strip = true        # Remove todos os símbolos e informações de debug (o "estripado")
