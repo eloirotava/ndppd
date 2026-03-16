@@ -1,0 +1,20 @@
+[package]
+name = "bunker-net"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# O coração assíncrono
+tokio = { version = "1.35", features = ["full"] }
+socket2 = { version = "0.5", features = ["all"] }
+libc = "0.2"
+
+# Para forjar os pacotes ICMPv6 (Router Advertisement) "na mão"
+pnet = "0.34"
+
+# Facilita a vida pra ler e montar os pacotes DHCP sem fazer bitwise do zero
+dhcproto = "0.11" 
+
+# Para a gente ver o que está acontecendo no console
+log = "0.4"
+env_logger = "0.10"
