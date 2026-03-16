@@ -6,6 +6,8 @@ edition = "2021"
 [dependencies]
 # O coração assíncrono
 tokio = { version = "1.35", features = ["full"] }
+socket2 = { version = "0.5", features = ["all"] }
+libc = "0.2"
 
 # Para forjar os pacotes ICMPv6 (Router Advertisement) "na mão"
 pnet = "0.34"
