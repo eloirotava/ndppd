@@ -11,7 +11,7 @@ async fn main() {
     env_logger::init();
     log::info!("🚀 Bunker-Net V2: Iniciando Orquestrador Multi-Bridge...");
 
-    let app_config = config::load_config("bunker.conf");
+    let app_config = config::load_config("ndp.conf");
     let shared_config = Arc::new(app_config);
 
     // Health Check
