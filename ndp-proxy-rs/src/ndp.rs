@@ -1,4 +1,5 @@
 use std::net::Ipv6Addr;
+use std::os::unix::io::AsRawFd; // Importação necessária para usar .as_raw_fd()
 use pnet::packet::ethernet::{EtherTypes, EthernetPacket, MutableEthernetPacket};
 use pnet::packet::icmpv6::{Icmpv6Packet, Icmpv6Types, checksum};
 use pnet::packet::icmpv6::ndp::NeighborSolicitPacket;
@@ -11,7 +12,6 @@ use crate::config::BridgeConfig;
 pub async fn start_proxy(cfg: BridgeConfig) -> anyhow::Result<()> {
     log::info!("🛡️ Motor NDP Proxy iniciado na interface '{}'", cfg.name);
     
-    // Abre o socket bruto na interface
     let socket = socket2::Socket::new(socket2::Domain::IPV6, socket2::Type::RAW, Some(socket2::Protocol::ICMPV6))?;
     socket.bind_device(Some(cfg.name.as_bytes()))?;
     socket.set_nonblocking(true)?;
@@ -30,7 +30,9 @@ pub async fn start_proxy(cfg: BridgeConfig) -> anyhow::Result<()> {
         }) {
             Ok(Ok(len)) => {
                 if let Some(reply) = process_ndp(&buf[..len], &cfg) {
-                    let _ = unsafe { libc::write(async_fd.as_raw_fd(), reply.as_ptr() as *const libc::c_void, reply.len()) };
+                    let _ = unsafe { 
+                        libc::write(async_fd.as_raw_fd(), reply.as_ptr() as *const libc::c_void, reply.len()) 
+                    };
                 }
             },
             _ => continue,
@@ -46,8 +48,9 @@ fn process_ndp(buf: &[u8], cfg: &BridgeConfig) -> Option<Vec<u8>> {
     if icmp.get_icmpv6_type() == Icmpv6Types::NeighborSolicit {
         if let Some(ns) = NeighborSolicitPacket::new(ipv6.payload()) {
             let target = ns.get_target_addr();
-            // Verifica se o IP pertence ao prefixo que estamos defendendo
-            if target.octets().starts_with(&cfg.ipv6_prefix.parse::<Ipv6Addr>().unwrap().octets()[..10]) {
+            // Verifica se o IP pertence ao prefixo configurado
+            let prefix_ip: Ipv6Addr = cfg.ipv6_prefix.parse().ok()?;
+            if target.octets().starts_with(&prefix_ip.octets()[..10]) {
                 log::info!("   [!] Respondendo NDP Proxy para: {}", target);
                 return Some(build_na(eth.get_destination(), eth.get_source(), target, ipv6.get_source()));
             }
@@ -58,19 +61,17 @@ fn process_ndp(buf: &[u8], cfg: &BridgeConfig) -> Option<Vec<u8>> {
 
 fn build_na(my_mac: MacAddr, dst_mac: MacAddr, target_ip: Ipv6Addr, dst_ip: Ipv6Addr) -> Vec<u8> {
     let mut buffer = vec![0u8; 86];
-    // Ethernet
     let mut eth = MutableEthernetPacket::new(&mut buffer[0..14]).unwrap();
     eth.set_source(my_mac); eth.set_destination(dst_mac); eth.set_ethertype(EtherTypes::Ipv6);
-    // IPv6
+    
     let mut ipv6 = MutableIpv6Packet::new(&mut buffer[14..54]).unwrap();
     ipv6.set_version(6); ipv6.set_payload_length(32); ipv6.set_next_header(pnet::packet::ip::IpNextHeaderProtocols::Icmpv6);
     ipv6.set_hop_limit(255); ipv6.set_source(target_ip); ipv6.set_destination(dst_ip);
-    // ICMPv6
-    buffer[54] = 136; // Type NA
-    buffer[58] = 0x60; // Flags: Solicited + Override
+    
+    buffer[54] = 136; buffer[58] = 0x60;
     buffer[62..78].copy_from_slice(&target_ip.octets());
     buffer[78] = 2; buffer[79] = 1; buffer[80..86].copy_from_slice(&my_mac.octets());
-    // Checksum
+    
     let cs = checksum(&Icmpv6Packet::new(&buffer[54..86]).unwrap(), &target_ip, &dst_ip);
     buffer[56] = (cs >> 8) as u8; buffer[57] = (cs & 0xff) as u8;
     buffer

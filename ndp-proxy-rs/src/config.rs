@@ -5,11 +5,9 @@ use std::net::Ipv4Addr;
 pub struct BridgeConfig {
     pub name: String,
     pub mode: String,
-    // IPv4
     pub ipv4_network: String,
     pub ipv4_mask: String,
     pub ipv4_range_start: String,
-    // IPv6
     pub ipv6_prefix: String,
     pub ipv6_prefix_len: u8,
 }
@@ -20,22 +18,27 @@ pub struct AppConfig {
 }
 
 pub fn load_config(path: &str) -> AppConfig {
-    let conf = Ini::load_from_file(path).expect("Erro ao carregar bunker.conf");
+    let conf = Ini::load_from_file(path).expect("Erro ao carregar arquivo de configuracao");
     let mut bridges = Vec::new();
     let mut leases_file = String::from("leases.json");
 
-    for (sec, prop) in &conf {
-        let name = sec.as_ref().unwrap_or(&"default".to_string()).to_string();
+    for (sec, prop) in conf.iter() {
+        // Correção E0282: Especificando que 'name' é String de forma clara
+        let name: String = match sec {
+            Some(s) => s.to_string(),
+            None => "default".to_string(),
+        };
+        
         if name == "general" {
-            leases_file = prop.get("persistence_file").unwrap_or(&"leases.json".to_string()).to_string();
+            if let Some(val) = prop.get("persistence_file") {
+                leases_file = val.to_string();
+            }
             continue;
         }
 
-        // Lógica para tratar o "/" no IPv4
         let raw_v4 = prop.get("ipv4_network").unwrap_or(&"10.0.0.0/8".to_string()).to_string();
         let (v4_addr, v4_mask) = parse_ipv4_cidr(&raw_v4);
 
-        // Lógica para tratar o "/" no IPv6
         let raw_v6 = prop.get("ipv6_prefix").unwrap_or(&"::/64".to_string()).to_string();
         let (v6_addr, v6_len) = parse_ipv6_cidr(&raw_v6);
 
@@ -57,8 +60,7 @@ fn parse_ipv4_cidr(input: &str) -> (String, String) {
     let addr = parts[0].to_string();
     let prefix = if parts.len() > 1 { parts[1].parse::<u8>().unwrap_or(24) } else { 24 };
     
-    // Converte /prefix para 255.255.255.0
-    let mask = !0u32 << (32 - prefix);
+    let mask = if prefix == 0 { 0 } else { !0u32 << (32 - prefix) };
     let mask_addr = Ipv4Addr::from(mask.to_be());
     (addr, mask_addr.to_string())
 }
