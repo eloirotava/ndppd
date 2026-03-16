@@ -6,23 +6,37 @@ mod ndp;
 mod storage;
 
 use std::sync::Arc;
+use std::env; // Importado para argumentos de linha de comando
 use crate::storage::LeaseManager;
 
 #[tokio::main]
 async fn main() {
     env_logger::init();
-    log::info!("🚀 Bunker-Net V3: Orquestrador Iniciado");
 
-    let app_config = config::load_config("ndp.conf");
+    // Lógica para detectar o argumento -c
+    let args: Vec<String> = env::args().collect();
+    let config_path = if let Some(pos) = args.iter().position(|x| x == "-c") {
+        args.get(pos + 1).map(|s| s.as_str()).unwrap_or("ndp.conf")
+    } else {
+        "ndp.conf"
+    };
+
+    log::info!("🚀 Bunker-Net V2: Orquestrador Iniciado");
+    log::info!("📖 Utilizando configuração: {}", config_path);
+
+    let app_config = config::load_config(config_path);
     let lease_manager = LeaseManager::new(&app_config.leases_file);
     
-    let mut handles = vec![];
-    let all_bridges = Arc::new(app_config.bridges);
+    check_system_health();
 
-    for bridge in all_bridges.iter() {
-        let b = Arc::new(bridge.clone());
+    let mut handles = vec![];
+    // Criamos uma cópia de todas as configurações para passar ao motor NDP
+    let all_configs = app_config.bridges.clone();
+
+    for bridge in app_config.bridges {
+        let b = Arc::new(bridge);
         let lm = Arc::clone(&lease_manager);
-        let all_configs = (*all_bridges).clone();
+        let ac = all_configs.clone(); // Cópia para o motor NDP
 
         if b.mode == "server" {
             let b_c = Arc::clone(&b);
@@ -35,13 +49,17 @@ async fn main() {
             }));
         } else if b.mode == "ndp-proxy" {
             let b_c = Arc::clone(&b);
-            // NDP Proxy precisa de thread blocking para o loop do pnet
-            handles.push(tokio::task::spawn_blocking(move || {
-                let rt = tokio::runtime::Runtime::new().unwrap();
-                rt.block_on(ndp::start_proxy((*b_c).clone(), all_configs));
+            handles.push(tokio::spawn(async move {
+                // Correção do erro E0061: Passando os 2 argumentos (config da bridge + todas as configs)
+                let _ = ndp::start_proxy((*b_c).clone(), ac).await;
             }));
         }
     }
-    
     futures::future::join_all(handles).await;
+}
+
+fn check_system_health() {
+    let check = |path: &str| std::fs::read_to_string(path).unwrap_or_default().trim() == "1";
+    if !check("/proc/sys/net/ipv4/ip_forward") { log::error!("❌ IPv4 Forwarding OFF!"); }
+    if !check("/proc/sys/net/ipv6/conf/all/forwarding") { log::error!("❌ IPv6 Forwarding OFF!"); }
 }

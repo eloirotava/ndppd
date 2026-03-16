@@ -510,6 +510,7 @@ dependencies = [
  "libc",
  "log",
  "pnet",
+ "rand",
  "rust-ini",
  "serde",
  "serde_json",

@@ -4,6 +4,7 @@ use tokio::net::UdpSocket;
 use dhcproto::v4::{Message, MessageType, Opcode, DhcpOption, OptionCode};
 use dhcproto::{Decoder, Decodable, Encoder, Encodable};
 use socket2::{Socket, Domain, Type, Protocol};
+use rand::Rng; // Importado para aleatoriedade
 use crate::config::BridgeConfig;
 use crate::storage::LeaseManager;
 
@@ -32,13 +33,34 @@ pub async fn start_server(config: Arc<BridgeConfig>, storage: Arc<LeaseManager>)
                     msg.chaddr()[0], msg.chaddr()[1], msg.chaddr()[2], 
                     msg.chaddr()[3], msg.chaddr()[4], msg.chaddr()[5]);
 
+                // LÓGICA DE IP ALEATÓRIO NO INTERVALO
                 let lease = storage.get_lease(&mac).unwrap_or_else(|| {
-                    let ip = config.ipv4_range_start.clone();
-                    storage.set_lease(&mac, ip, "".to_string());
+                    let mut rng = rand::thread_rng();
+                    let net_u32 = u32::from(config.ipv4_network.parse::<Ipv4Addr>().unwrap());
+                    let mask_u32 = u32::from(config.ipv4_mask.parse::<Ipv4Addr>().unwrap());
+                    
+                    let mut random_ip;
+                    loop {
+                        let rand_val: u32 = rng.gen();
+                        // Aplica a máscara: mantém a parte da rede e randomiza a parte do host
+                        random_ip = (net_u32 & mask_u32) | (rand_val & !mask_u32);
+                        
+                        // Validações: evita endereço de rede, broadcast e o gateway (.1)
+                        if random_ip != (net_u32 & mask_u32) && 
+                           random_ip != (net_u32 | !mask_u32) && 
+                           random_ip != ((net_u32 & mask_u32) | 1) { 
+                            break; 
+                        }
+                    }
+                    
+                    let ip_str = Ipv4Addr::from(random_ip).to_string();
+                    storage.set_lease(&mac, ip_str, "".to_string());
                     storage.get_lease(&mac).unwrap()
                 });
 
                 let offered_ip: Ipv4Addr = lease.ipv4.parse().unwrap_or(Ipv4Addr::new(10,0,0,2));
+                
+                // Mantém a sua lógica de Gateway sendo o .1 da rede oferecida
                 let mut gw_octets = offered_ip.octets();
                 gw_octets[3] = 1;
                 let server_ip = Ipv4Addr::from(gw_octets);
@@ -46,12 +68,12 @@ pub async fn start_server(config: Arc<BridgeConfig>, storage: Arc<LeaseManager>)
 
                 let mut reply = Message::default();
                 reply.set_opcode(Opcode::BootReply)
-                     .set_htype(msg.htype()) // IGUAL AO DNSMASQ-RS
+                     .set_htype(msg.htype())
                      .set_xid(msg.xid())
-                     .set_flags(msg.flags()) // IGUAL AO DNSMASQ-RS
+                     .set_flags(msg.flags())
                      .set_chaddr(msg.chaddr())
                      .set_yiaddr(offered_ip)
-                     .set_siaddr(server_ip); // IGUAL AO DNSMASQ-RS
+                     .set_siaddr(server_ip);
 
                 let opts = reply.opts_mut();
                 opts.insert(DhcpOption::MessageType(if mtype == MessageType::Discover { MessageType::Offer } else { MessageType::Ack }));
@@ -65,7 +87,7 @@ pub async fn start_server(config: Arc<BridgeConfig>, storage: Arc<LeaseManager>)
                 let mut encoder = Encoder::new(&mut out_buf);
                 if reply.encode(&mut encoder).is_ok() {
                     let _ = socket.send_to(&out_buf, "255.255.255.255:68").await;
-                    log::info!("   ✅ [DHCPv4] {} {} enviado para {} (Netmask: {})", if mtype == MessageType::Discover {"OFFER"} else {"ACK"}, offered_ip, mac, mask);
+                    log::info!("   ✅ [DHCPv4] {} {} enviado para {}", if mtype == MessageType::Discover {"OFFER"} else {"ACK"}, offered_ip, mac);
                 }
             }
         }

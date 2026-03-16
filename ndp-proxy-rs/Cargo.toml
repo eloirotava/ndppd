@@ -16,6 +16,7 @@ rust-ini = "0.21"
 pnet = "0.34"
 anyhow = "1.0"
 futures = "0.3"
+rand = "0.8"
 
 # --- ADICIONE ESTA SEÇÃO ABAIXO ---
 [profile.release]
