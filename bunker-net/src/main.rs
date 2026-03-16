@@ -3,7 +3,7 @@ mod dhcp4;
 mod dhcp6;
 mod radvd;
 
-use log::{info, error};
+use log::info;
 use std::sync::Arc;
 
 #[tokio::main]

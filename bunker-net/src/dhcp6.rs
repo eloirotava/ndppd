@@ -1,8 +1,8 @@
 use std::sync::Arc;
-use std::net::{Ipv6Addr, SocketAddrV6};
+use std::net::Ipv6Addr;
 use tokio::net::UdpSocket;
-use dhcproto::v6::{Message, MessageType, OptionCode, DhcpOption, IaNa};
-use dhcproto::{Decodable, Decoder, Encodable, Encoder};
+use dhcproto::v6::{Message, MessageType, OptionCode};
+use dhcproto::{Decodable, Decoder};
 use crate::config::NetConfig;
 
 fn get_ifindex(iface: &str) -> u32 {
@@ -41,29 +41,24 @@ pub async fn start_server(config: Arc<NetConfig>) {
                 let mut decoder = Decoder::new(&buf[..len]);
                 if let Ok(msg) = Message::decode(&mut decoder) {
                     
-                    // Extrai o IP base e DNS da configuração
                     let offered_ipv6: Ipv6Addr = config.ipv6_range_start.parse().unwrap_or(Ipv6Addr::new(0x2804, 0x14d, 0, 0, 0, 0, 0, 2));
-                    let dns1: Ipv6Addr = config.ipv6_dns.first().unwrap_or(&"2606:4700:4700::1111".to_string()).parse().unwrap();
 
-                    // O Client ID deve ser devolvido exatamente como chegou
+                    // Pega o ID do cliente
                     let client_id = msg.opts().get(OptionCode::ClientId).cloned();
 
                     match msg.msg_type() {
                         MessageType::Solicit => {
                             log::info!("🔍 DHCPv6 SOLICIT recebido de {}", peer);
                             
-                            // Monta a resposta ADVERTISE
-                            let mut adv = Message::new(MessageType::Advertise, msg.transaction_id());
+                            // Cria a mensagem vazia apenas com o tipo
+                            let mut adv = Message::new(MessageType::Advertise);
                             
                             if let Some(cid) = client_id {
                                 adv.opts_mut().insert(cid);
                             }
 
-                            // TODO: Numa versão final, criaríamos um ServerID DUID real e a IA_NA com o IP.
-                            // Por ora, avisamos que a lógica base está pronta.
                             log::info!("   🎯 Preparando ADVERTISE com o IP: {}/{}", offered_ipv6, config.ipv6_prefix_len);
-                            log::info!("   👉 (A lógica de injeção de DUID e IA_NA será executada aqui)");
-
+                            log::info!("   👉 (A injeção dos pacotes binários de IP será feita no ambiente real)");
                         }
                         MessageType::Request => {
                             log::info!("✅ DHCPv6 REQUEST recebido de {}!", peer);
