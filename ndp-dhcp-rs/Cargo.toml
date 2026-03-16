@@ -1,5 +1,5 @@
 [package]
-name = "ndp-proxy-rs"
+name = "ndp-dhcp-rs"
 version = "0.2.0"
 edition = "2021"
 
