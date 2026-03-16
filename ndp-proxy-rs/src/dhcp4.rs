@@ -4,9 +4,78 @@ use tokio::net::UdpSocket;
 use dhcproto::v4::{Message, MessageType, Opcode, DhcpOption, OptionCode};
 use dhcproto::{Decoder, Decodable, Encoder, Encodable};
 use socket2::{Socket, Domain, Type, Protocol};
-use rand::Rng; // Importado para aleatoriedade
+use rand::Rng;
+
+// Imports pnet para ARP Probe nativo
+use pnet::datalink::{self, Channel};
+use pnet::packet::Packet; // Resolve E0599
+use pnet::packet::arp::{ArpOperations, ArpPacket, MutableArpPacket, ArpHardwareTypes};
+use pnet::packet::ethernet::{EtherTypes, EthernetPacket, MutableEthernetPacket};
+use pnet::util::MacAddr;
+
 use crate::config::BridgeConfig;
 use crate::storage::LeaseManager;
+
+/// Verifica se um IPv4 está em uso enviando um ARP Request nativo
+fn is_ipv4_in_use(iface_name: &str, target_ip: Ipv4Addr) -> bool {
+    let interfaces = datalink::interfaces();
+    let interface = interfaces.into_iter().find(|iface| iface.name == iface_name).expect("Interface não encontrada");
+    
+    let source_mac = interface.mac.unwrap_or(MacAddr::zero());
+    let source_ip = interface.ips.iter()
+        .find(|ip| ip.is_ipv4())
+        .map(|ip| match ip.ip() {
+            std::net::IpAddr::V4(v4) => v4,
+            _ => Ipv4Addr::UNSPECIFIED,
+        })
+        .unwrap_or(Ipv4Addr::UNSPECIFIED);
+
+    let (mut tx, mut rx) = match datalink::channel(&interface, Default::default()) {
+        Ok(Channel::Ethernet(tx, rx)) => (tx, rx),
+        _ => return false,
+    };
+
+    // Monta o frame Ethernet
+    let mut eth_buf = [0u8; 42]; 
+    let mut eth_packet = MutableEthernetPacket::new(&mut eth_buf).unwrap();
+    eth_packet.set_destination(MacAddr::broadcast());
+    eth_packet.set_source(source_mac);
+    eth_packet.set_ethertype(EtherTypes::Arp);
+
+    // Monta o pacote ARP
+    let mut arp_buf = [0u8; 28];
+    let mut arp_packet = MutableArpPacket::new(&mut arp_buf).unwrap();
+    arp_packet.set_hardware_type(ArpHardwareTypes::Ethernet);
+    arp_packet.set_protocol_type(EtherTypes::Ipv4);
+    arp_packet.set_hw_addr_len(6);
+    arp_packet.set_proto_addr_len(4);
+    arp_packet.set_operation(ArpOperations::Request);
+    arp_packet.set_sender_hw_addr(source_mac);
+    arp_packet.set_sender_proto_addr(source_ip);
+    arp_packet.set_target_hw_addr(MacAddr::zero());
+    arp_packet.set_target_proto_addr(target_ip);
+    
+    eth_packet.set_payload(arp_packet.packet()); 
+
+    let _ = tx.send_to(eth_packet.packet(), None);
+
+    // Escuta por uma resposta (ARP Reply) por 400ms
+    let start = std::time::Instant::now();
+    while start.elapsed() < std::time::Duration::from_millis(400) {
+        if let Ok(packet) = rx.next() {
+            if let Some(eth) = EthernetPacket::new(packet) {
+                if eth.get_ethertype() == EtherTypes::Arp {
+                    if let Some(arp) = ArpPacket::new(eth.payload()) {
+                        if arp.get_operation() == ArpOperations::Reply && arp.get_sender_proto_addr() == target_ip {
+                            return true; // IP ocupado
+                        }
+                    }
+                }
+            }
+        }
+    }
+    false
+}
 
 pub async fn start_server(config: Arc<BridgeConfig>, storage: Arc<LeaseManager>) {
     let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).expect("Erro socket");
@@ -33,47 +102,37 @@ pub async fn start_server(config: Arc<BridgeConfig>, storage: Arc<LeaseManager>)
                     msg.chaddr()[0], msg.chaddr()[1], msg.chaddr()[2], 
                     msg.chaddr()[3], msg.chaddr()[4], msg.chaddr()[5]);
 
-                // LÓGICA DE IP ALEATÓRIO NO INTERVALO
                 let lease = storage.get_lease(&mac).unwrap_or_else(|| {
                     let mut rng = rand::thread_rng();
                     let net_u32 = u32::from(config.ipv4_network.parse::<Ipv4Addr>().unwrap());
                     let mask_u32 = u32::from(config.ipv4_mask.parse::<Ipv4Addr>().unwrap());
+                    let gw_u32 = u32::from(config.ipv4_gateway.parse::<Ipv4Addr>().expect("Gateway no conf é obrigatório"));
                     
-                    let mut random_ip;
+                    let mut ip_str;
                     loop {
                         let rand_val: u32 = rng.gen();
-                        // Aplica a máscara: mantém a parte da rede e randomiza a parte do host
-                        random_ip = (net_u32 & mask_u32) | (rand_val & !mask_u32);
+                        let candidate = (net_u32 & mask_u32) | (rand_val & !mask_u32);
+                        let cand_ip = Ipv4Addr::from(candidate);
+                        ip_str = cand_ip.to_string();
                         
-                        // Validações: evita endereço de rede, broadcast e o gateway (.1)
-                        if random_ip != (net_u32 & mask_u32) && 
-                           random_ip != (net_u32 | !mask_u32) && 
-                           random_ip != ((net_u32 & mask_u32) | 1) { 
+                        if candidate != (net_u32 & mask_u32) && 
+                           candidate != (net_u32 | !mask_u32) && 
+                           candidate != gw_u32 &&
+                           !is_ipv4_in_use(&config.name, cand_ip) { 
                             break; 
                         }
                     }
-                    
-                    let ip_str = Ipv4Addr::from(random_ip).to_string();
                     storage.set_lease(&mac, ip_str, "".to_string());
                     storage.get_lease(&mac).unwrap()
                 });
 
                 let offered_ip: Ipv4Addr = lease.ipv4.parse().unwrap_or(Ipv4Addr::new(10,0,0,2));
-                
-                // Mantém a sua lógica de Gateway sendo o .1 da rede oferecida
-                let mut gw_octets = offered_ip.octets();
-                gw_octets[3] = 1;
-                let server_ip = Ipv4Addr::from(gw_octets);
+                let server_ip: Ipv4Addr = config.ipv4_gateway.parse().unwrap_or(Ipv4Addr::new(10,0,0,1));
                 let mask: Ipv4Addr = config.ipv4_mask.parse().unwrap_or(Ipv4Addr::new(255,0,0,0));
 
                 let mut reply = Message::default();
-                reply.set_opcode(Opcode::BootReply)
-                     .set_htype(msg.htype())
-                     .set_xid(msg.xid())
-                     .set_flags(msg.flags())
-                     .set_chaddr(msg.chaddr())
-                     .set_yiaddr(offered_ip)
-                     .set_siaddr(server_ip);
+                reply.set_opcode(Opcode::BootReply).set_htype(msg.htype()).set_xid(msg.xid())
+                     .set_flags(msg.flags()).set_chaddr(msg.chaddr()).set_yiaddr(offered_ip).set_siaddr(server_ip);
 
                 let opts = reply.opts_mut();
                 opts.insert(DhcpOption::MessageType(if mtype == MessageType::Discover { MessageType::Offer } else { MessageType::Ack }));
@@ -87,7 +146,7 @@ pub async fn start_server(config: Arc<BridgeConfig>, storage: Arc<LeaseManager>)
                 let mut encoder = Encoder::new(&mut out_buf);
                 if reply.encode(&mut encoder).is_ok() {
                     let _ = socket.send_to(&out_buf, "255.255.255.255:68").await;
-                    log::info!("   ✅ [DHCPv4] {} {} enviado para {}", if mtype == MessageType::Discover {"OFFER"} else {"ACK"}, offered_ip, mac);
+                    log::info!("   ✅ [DHCPv4] {} {} para {}", if mtype == MessageType::Discover {"OFFER"} else {"ACK"}, offered_ip, mac);
                 }
             }
         }
