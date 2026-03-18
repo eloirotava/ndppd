@@ -1,13 +1,22 @@
 use std::process::{Command, Stdio};
 use std::io::Write;
+use std::collections::HashSet;
+use std::sync::Mutex;
 
 pub struct FirewallManager {
     table: String,
+    // NOVO: Guarda na memória os MACs que já têm regras ativas para não duplicar
+    secured_v4_macs: Mutex<HashSet<String>>,
+    secured_v6_macs: Mutex<HashSet<String>>,
 }
 
 impl FirewallManager {
     pub fn new() -> Self {
-        Self { table: "ndp_dhcp_sec".to_string() }
+        Self { 
+            table: "ndp_dhcp_sec".to_string(),
+            secured_v4_macs: Mutex::new(HashSet::new()),
+            secured_v6_macs: Mutex::new(HashSet::new()),
+        }
     }
 
     pub fn init_tables(&self) {
@@ -26,6 +35,8 @@ impl FirewallManager {
             self.table, self.table, self.table
         );
         self.apply(&ruleset);
+        self.secured_v4_macs.lock().unwrap().clear();
+        self.secured_v6_macs.lock().unwrap().clear();
     }
 
     pub fn init_nat(&self) {
@@ -42,7 +53,6 @@ impl FirewallManager {
         self.apply(&ruleset);
     }
 
-    // CORREÇÃO: Faz Masquerade EXCLUSIVAMENTE para IPv4
     pub fn enable_nat_for_network(&self, iface: &str, ipv4_cidr: &str) {
         log::info!("🌍 [Firewall] Ativando NAT (Masquerade) apenas para IPv4 na rede de {}", iface);
         let mut ruleset = String::new();
@@ -53,6 +63,10 @@ impl FirewallManager {
     }
 
     pub fn bind_mac_to_ipv4(&self, mac: &str, ipv4: &str) {
+        // Bloqueio de duplicatas
+        let mut macs = self.secured_v4_macs.lock().unwrap();
+        if macs.contains(mac) { return; }
+        
         log::info!("🔒 [Firewall] MAC {} restrito ao IPv4 {}", mac, ipv4);
         let ruleset = format!(
             "add rule bridge {} prerouting ether saddr {} ip saddr != {{ {}, 0.0.0.0 }} drop\n\
@@ -61,9 +75,14 @@ impl FirewallManager {
             self.table, ipv4, mac
         );
         self.apply(&ruleset);
+        macs.insert(mac.to_string());
     }
 
     pub fn bind_mac_to_ipv6(&self, mac: &str, ipv6_cidr: &str) {
+        // Bloqueio de duplicatas
+        let mut macs = self.secured_v6_macs.lock().unwrap();
+        if macs.contains(mac) { return; }
+
         log::info!("🔒 [Firewall] MAC {} restrito ao Prefixo IPv6 {}", mac, ipv6_cidr);
         let ruleset = format!(
             "add rule bridge {} prerouting ether saddr {} ip6 saddr != {{ {}, fe80::/10, :: }} drop\n\
@@ -72,6 +91,7 @@ impl FirewallManager {
             self.table, ipv6_cidr, mac
         );
         self.apply(&ruleset);
+        macs.insert(mac.to_string());
     }
 
     fn apply(&self, ruleset: &str) {
