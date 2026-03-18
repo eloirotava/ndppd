@@ -35,16 +35,21 @@ impl FirewallManager {
             self.table, self.table, self.table
         );
 
-        // Appends the default drop rules for managed interfaces at the end of the empty chains
         for iface in managed_interfaces {
-            // Permitir DHCPv4 e DHCPv6 para que os clientes consigam pegar IP
-            ruleset.push_str(&format!("add rule bridge {} prerouting iifname \"{}\" udp dport {{ 67, 547 }} accept\n", self.table, iface));
+            // Usamos 'meta ibrname' (Input Bridge Name) para garantir que o tráfego 
+            // vindo de interfaces virtuais (veth) conectadas à bridge seja avaliado corretamente.
             
-            // Permitir ICMPv6 (Essencial para NDP, SLAAC, RS/RA, NS/NA fluírem no IPv6)
-            ruleset.push_str(&format!("add rule bridge {} prerouting iifname \"{}\" ip6 nexthdr icmpv6 accept\n", self.table, iface));
+            // 1. Permitir DHCPv4 e DHCPv6 para que os clientes obtenham IP
+            ruleset.push_str(&format!("add rule bridge {} prerouting meta ibrname \"{}\" udp dport {{ 67, 547 }} accept\n", self.table, iface));
             
-            // Regra final: DROP para tudo que não deu match acima NESTA interface específica
-            ruleset.push_str(&format!("add rule bridge {} prerouting iifname \"{}\" drop\n", self.table, iface));
+            // 2. Permitir ICMPv6 (Essencial para Neighbor Discovery e funcionamento do IPv6)
+            ruleset.push_str(&format!("add rule bridge {} prerouting meta ibrname \"{}\" ip6 nexthdr icmpv6 accept\n", self.table, iface));
+
+            // 3. Permitir ARP (Essencial para o IPv4 conseguir resolver MACs da rede)
+            ruleset.push_str(&format!("add rule bridge {} prerouting meta ibrname \"{}\" ether type arp accept\n", self.table, iface));
+            
+            // 4. DROP final (Bloqueia tudo o resto que não deu match nas regras de topo ou exceções)
+            ruleset.push_str(&format!("add rule bridge {} prerouting meta ibrname \"{}\" drop\n", self.table, iface));
         }
 
         self.apply(&ruleset);
@@ -81,8 +86,7 @@ impl FirewallManager {
         
         log::info!("🔒 [Firewall] MAC {} autorizado para IPv4 {}", mac, ipv4);
         
-        // Usamos 'insert' para garantir que a regra fique no topo, ANTES da regra de 'drop' da interface.
-        // Se o MAC enviar tráfego com um IP diferente, a regra não dá match e ele cai no 'drop' no final.
+        // Usamos 'insert' para garantir que a regra de accept fique no topo da chain.
         let ruleset = format!(
             "insert rule bridge {} prerouting ether saddr {} ip saddr {{ {}, 0.0.0.0 }} accept\n\
              insert rule bridge {} postrouting ip daddr {} ether daddr != {} drop\n",
@@ -99,7 +103,7 @@ impl FirewallManager {
 
         log::info!("🔒 [Firewall] MAC {} autorizado para Prefixo IPv6 {}", mac, ipv6_cidr);
         
-        // Usamos 'insert' para garantir que a regra fique no topo.
+        // Usamos 'insert' para garantir que a regra de accept fique no topo da chain.
         let ruleset = format!(
             "insert rule bridge {} prerouting ether saddr {} ip6 saddr {{ {}, fe80::/10, :: }} accept\n\
              insert rule bridge {} postrouting ip6 daddr {} ether daddr != {} drop\n",
