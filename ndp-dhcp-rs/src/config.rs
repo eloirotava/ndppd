@@ -8,12 +8,14 @@ pub struct BridgeConfig {
     pub mode: String,
     pub ipv4_network: String,
     pub ipv4_mask: String,
+    pub ipv4_prefix_len: u8, // NOVO CAMPO
     pub ipv4_gateway: String,
     pub ipv4_range_start: String,
     pub ipv6_prefix: String,
     pub ipv6_prefix_len: u8,
-    // NOVO CAMPO AQUI:
     pub ipv6_delegation_size: u8,
+    pub use_nftables: bool,
+    pub enable_nat: bool,
 }
 
 pub struct AppConfig {
@@ -43,10 +45,13 @@ pub fn load_config(path: &str) -> AppConfig {
 
         let mut v4_net = "10.0.0.0".to_string();
         let mut v4_mask = "255.0.0.0".to_string();
+        let mut v4_pref = 8; // Default prefix
         let mut v4_gw = "10.0.0.1".to_string();
         let mut v6_pre = "::".to_string();
         let mut v6_len = 64;
-        let mut v6_deleg = 128; // Defeito é 128 (comportamento atual)
+        let mut v6_deleg = 128;
+        let mut use_nft = false;
+        let mut use_nat = false;
 
         if let Some(iface) = all_interfaces.iter().find(|i| i.name == name) {
             if let Some(ip_net) = iface.ips.iter().find(|ip| ip.is_ipv4()) {
@@ -54,6 +59,7 @@ pub fn load_config(path: &str) -> AppConfig {
                     let network = u32::from(addr) & u32::from(mask);
                     v4_net = Ipv4Addr::from(network).to_string();
                     v4_mask = mask.to_string();
+                    v4_pref = ip_net.prefix(); // Lê o prefixo (ex: 24) da interface real
                     v4_gw = addr.to_string(); 
                 }
             }
@@ -64,9 +70,10 @@ pub fn load_config(path: &str) -> AppConfig {
         }
 
         if let Some(raw_v4) = prop.get("ipv4_network") {
-            let (addr, mask) = parse_ipv4_cidr(raw_v4);
+            let (addr, mask, pref) = parse_ipv4_cidr(raw_v4);
             v4_net = addr;
             v4_mask = mask;
+            v4_pref = pref;
         }
         
         if let Some(gw) = prop.get("ipv4_gateway") { v4_gw = gw.trim().to_string(); }
@@ -77,9 +84,14 @@ pub fn load_config(path: &str) -> AppConfig {
             v6_len = len;
         }
 
-        // LÊ O NOVO PARÂMETRO
         if let Some(raw_deleg) = prop.get("ipv6_delegation_size") {
             v6_deleg = raw_deleg.trim().parse::<u8>().unwrap_or(128);
+        }
+        if let Some(val) = prop.get("use_nftables") {
+            use_nft = val.trim() == "true";
+        }
+        if let Some(val) = prop.get("enable_nat") {
+            use_nat = val.trim() == "true";
         }
 
         bridges.push(BridgeConfig {
@@ -87,22 +99,25 @@ pub fn load_config(path: &str) -> AppConfig {
             mode: prop.get("type").map(|s| s.trim().to_string()).unwrap_or_else(|| "server".to_string()),
             ipv4_network: v4_net,
             ipv4_mask: v4_mask,
+            ipv4_prefix_len: v4_pref, // SALVA O PREFIXO AQUI
             ipv4_gateway: v4_gw,
             ipv4_range_start: prop.get("ipv4_range_start").map(|s| s.trim().to_string()).unwrap_or_else(|| "10.0.0.2".to_string()),
             ipv6_prefix: v6_pre,
             ipv6_prefix_len: v6_len,
             ipv6_delegation_size: v6_deleg,
+            use_nftables: use_nft,
+            enable_nat: use_nat,
         });
     }
     AppConfig { bridges, leases_file }
 }
 
-fn parse_ipv4_cidr(input: &str) -> (String, String) {
+fn parse_ipv4_cidr(input: &str) -> (String, String, u8) {
     let parts: Vec<&str> = input.split('/').collect();
     let addr = parts[0].trim().to_string();
     let prefix = if parts.len() > 1 { parts[1].trim().parse::<u8>().unwrap_or(24) } else { 24 };
     let mask = if prefix == 0 { 0 } else { 0xffffffffu32 << (32 - prefix) };
-    (addr, Ipv4Addr::from(mask).to_string())
+    (addr, Ipv4Addr::from(mask).to_string(), prefix)
 }
 
 fn parse_ipv6_cidr(input: &str) -> (String, u8) {

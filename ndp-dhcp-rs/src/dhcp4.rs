@@ -6,17 +6,16 @@ use dhcproto::{Decoder, Decodable, Encoder, Encodable};
 use socket2::{Socket, Domain, Type, Protocol};
 use rand::Rng;
 
-// Imports pnet para ARP Probe nativo
 use pnet::datalink::{self, Channel};
-use pnet::packet::Packet; // Resolve E0599
+use pnet::packet::Packet; 
 use pnet::packet::arp::{ArpOperations, ArpPacket, MutableArpPacket, ArpHardwareTypes};
 use pnet::packet::ethernet::{EtherTypes, EthernetPacket, MutableEthernetPacket};
 use pnet::util::MacAddr;
 
 use crate::config::BridgeConfig;
 use crate::storage::LeaseManager;
+use crate::firewall::FirewallManager;
 
-/// Verifica se um IPv4 está em uso enviando um ARP Request nativo
 fn is_ipv4_in_use(iface_name: &str, target_ip: Ipv4Addr) -> bool {
     let interfaces = datalink::interfaces();
     let interface = interfaces.into_iter().find(|iface| iface.name == iface_name).expect("Interface não encontrada");
@@ -35,14 +34,12 @@ fn is_ipv4_in_use(iface_name: &str, target_ip: Ipv4Addr) -> bool {
         _ => return false,
     };
 
-    // Monta o frame Ethernet
     let mut eth_buf = [0u8; 42]; 
     let mut eth_packet = MutableEthernetPacket::new(&mut eth_buf).unwrap();
     eth_packet.set_destination(MacAddr::broadcast());
     eth_packet.set_source(source_mac);
     eth_packet.set_ethertype(EtherTypes::Arp);
 
-    // Monta o pacote ARP
     let mut arp_buf = [0u8; 28];
     let mut arp_packet = MutableArpPacket::new(&mut arp_buf).unwrap();
     arp_packet.set_hardware_type(ArpHardwareTypes::Ethernet);
@@ -59,7 +56,6 @@ fn is_ipv4_in_use(iface_name: &str, target_ip: Ipv4Addr) -> bool {
 
     let _ = tx.send_to(eth_packet.packet(), None);
 
-    // Escuta por uma resposta (ARP Reply) por 400ms
     let start = std::time::Instant::now();
     while start.elapsed() < std::time::Duration::from_millis(400) {
         if let Ok(packet) = rx.next() {
@@ -67,7 +63,7 @@ fn is_ipv4_in_use(iface_name: &str, target_ip: Ipv4Addr) -> bool {
                 if eth.get_ethertype() == EtherTypes::Arp {
                     if let Some(arp) = ArpPacket::new(eth.payload()) {
                         if arp.get_operation() == ArpOperations::Reply && arp.get_sender_proto_addr() == target_ip {
-                            return true; // IP ocupado
+                            return true; 
                         }
                     }
                 }
@@ -77,7 +73,7 @@ fn is_ipv4_in_use(iface_name: &str, target_ip: Ipv4Addr) -> bool {
     false
 }
 
-pub async fn start_server(config: Arc<BridgeConfig>, storage: Arc<LeaseManager>) {
+pub async fn start_server(config: Arc<BridgeConfig>, storage: Arc<LeaseManager>, fw: Arc<FirewallManager>) {
     let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).expect("Erro socket");
     let _ = sock.set_reuse_address(true);
     let _ = sock.set_reuse_port(true); 
@@ -102,7 +98,13 @@ pub async fn start_server(config: Arc<BridgeConfig>, storage: Arc<LeaseManager>)
                     msg.chaddr()[0], msg.chaddr()[1], msg.chaddr()[2], 
                     msg.chaddr()[3], msg.chaddr()[4], msg.chaddr()[5]);
 
-                let lease = storage.get_lease(&mac).unwrap_or_else(|| {
+                // CORREÇÃO: Lê o lease ou cria um vazio
+                let mut lease = storage.get_lease(&mac).unwrap_or_else(|| crate::storage::Lease {
+                    ipv4: String::new(), ipv6: String::new(),
+                });
+
+                // CORREÇÃO: Só gera IPv4 se estiver vazio
+                if lease.ipv4.is_empty() {
                     let mut rng = rand::thread_rng();
                     let net_u32 = u32::from(config.ipv4_network.parse::<Ipv4Addr>().unwrap());
                     let mask_u32 = u32::from(config.ipv4_mask.parse::<Ipv4Addr>().unwrap());
@@ -122,9 +124,13 @@ pub async fn start_server(config: Arc<BridgeConfig>, storage: Arc<LeaseManager>)
                             break; 
                         }
                     }
+                    lease.ipv4 = ip_str.clone();
                     storage.set_lease(&mac, ip_str, "".to_string());
-                    storage.get_lease(&mac).unwrap()
-                });
+                }
+
+                if config.use_nftables && mtype == MessageType::Request && !lease.ipv4.is_empty() {
+                    fw.bind_mac_to_ipv4(&mac, &lease.ipv4);
+                }
 
                 let offered_ip: Ipv4Addr = lease.ipv4.parse().unwrap_or(Ipv4Addr::new(10,0,0,2));
                 let server_ip: Ipv4Addr = config.ipv4_gateway.parse().unwrap_or(Ipv4Addr::new(10,0,0,1));

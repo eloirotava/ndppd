@@ -5,10 +5,21 @@ use socket2::{Socket, Domain, Type, Protocol};
 use rand::Rng;
 use crate::config::BridgeConfig;
 use crate::storage::LeaseManager;
+use crate::firewall::FirewallManager;
 
 use pnet::datalink::{self, Channel};
 use pnet::packet::Packet;
 use pnet::packet::ethernet::{EtherTypes, EthernetPacket};
+
+fn extract_mac_from_duid(duid: &[u8]) -> Option<String> {
+    if duid.len() >= 14 && duid[0] == 0 && duid[1] == 1 {
+        Some(format!("{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}", duid[8], duid[9], duid[10], duid[11], duid[12], duid[13]))
+    } else if duid.len() >= 10 && duid[0] == 0 && duid[1] == 3 {
+        Some(format!("{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}", duid[4], duid[5], duid[6], duid[7], duid[8], duid[9]))
+    } else {
+        None
+    }
+}
 
 fn is_ipv6_in_use(iface_name: &str, target_ip: Ipv6Addr) -> bool {
     let interfaces = datalink::interfaces();
@@ -25,9 +36,7 @@ fn is_ipv6_in_use(iface_name: &str, target_ip: Ipv6Addr) -> bool {
             if let Some(eth) = EthernetPacket::new(packet) {
                 if eth.get_ethertype() == EtherTypes::Ipv6 {
                     if let Some(ipv6) = pnet::packet::ipv6::Ipv6Packet::new(eth.payload()) {
-                        if ipv6.get_source() == target_ip {
-                            return true;
-                        }
+                        if ipv6.get_source() == target_ip { return true; }
                     }
                 }
             }
@@ -47,7 +56,7 @@ fn get_mac_address(iface: &str) -> Vec<u8> {
         .split(':').map(|s| u8::from_str_radix(s, 16).unwrap_or(0)).collect()
 }
 
-pub async fn start_server(cfg: Arc<BridgeConfig>, storage: Arc<LeaseManager>) {
+pub async fn start_server(cfg: Arc<BridgeConfig>, storage: Arc<LeaseManager>, fw: Arc<FirewallManager>) {
     let ifindex = get_ifindex(&cfg.name);
     log::info!("📡 [DHCPv6] Iniciando em {} (Index: {}) na porta 547", cfg.name, ifindex);
 
@@ -84,7 +93,16 @@ pub async fn start_server(cfg: Arc<BridgeConfig>, storage: Arc<LeaseManager>) {
             }
 
             let peer_ip = peer.ip().to_string();
-            let lease = storage.get_lease(&peer_ip).unwrap_or_else(|| {
+            let mac = extract_mac_from_duid(if client_id.len() > 4 { &client_id[4..] } else { &[] })
+                .unwrap_or_else(|| peer_ip.clone());
+
+            // CORREÇÃO: Pega o lease, se não existir, cria um vazio
+            let mut lease = storage.get_lease(&mac).unwrap_or_else(|| crate::storage::Lease {
+                ipv4: String::new(), ipv6: String::new(),
+            });
+
+            // CORREÇÃO: Só gera se o IPv6 estiver vazio
+            if lease.ipv6.is_empty() {
                 let mut rng = rand::thread_rng();
                 let prefix_addr = cfg.ipv6_prefix.split('/').next().unwrap_or("::").parse::<Ipv6Addr>().unwrap_or(Ipv6Addr::UNSPECIFIED);
                 
@@ -97,18 +115,14 @@ pub async fn start_server(cfg: Arc<BridgeConfig>, storage: Arc<LeaseManager>) {
                     let mut rand_bytes = [0u8; 16];
                     rng.fill(&mut rand_bytes);
 
-                    // Matemática para calcular a subnet correta bit a bit
                     for i in 0..16 {
                         let bit_start = i * 8;
                         let bit_end = bit_start + 8;
                         
                         if bit_end <= prefix_bits {
-                            // Mantém o prefixo base (não faz nada)
                         } else if bit_start >= deleg_bits {
-                            // Área de host da subnet -> zera
                             octets[i] = 0;
                         } else {
-                            // Mistura: parte prefixo, parte subnet aleatória
                             let mut mask = 0u8;
                             let mut rand_mask = 0u8;
                             for b in 0..8 {
@@ -120,18 +134,37 @@ pub async fn start_server(cfg: Arc<BridgeConfig>, storage: Arc<LeaseManager>) {
                         }
                     }
 
-                    // Se gerou uma subnet maior que /128, garante que entrega o primeiro IP (ex: ::1)
-                    if deleg_bits < 128 {
-                        octets[15] |= 1;
-                    }
+                    if deleg_bits < 128 { octets[15] |= 1; }
 
                     let candidate = Ipv6Addr::from(octets);
                     ip_str = candidate.to_string();
                     if !is_ipv6_in_use(&cfg.name, candidate) { break; }
                 }
-                storage.set_lease(&peer_ip, "".to_string(), ip_str);
-                storage.get_lease(&peer_ip).unwrap()
-            });
+                lease.ipv6 = ip_str.clone();
+                storage.set_lease(&mac, "".to_string(), ip_str);
+            }
+
+            let mut cidr_str = format!("{}/128", lease.ipv6);
+            if let Ok(ip) = lease.ipv6.parse::<Ipv6Addr>() {
+                let mut cidr_octets = ip.octets();
+                let deleg_bits = cfg.ipv6_delegation_size as usize;
+                
+                if deleg_bits < 128 {
+                    for i in 0..16 {
+                        let bit_start = i * 8;
+                        if bit_start >= deleg_bits { cidr_octets[i] = 0; } 
+                        else if bit_start + 8 > deleg_bits {
+                            let shift = 8 - (deleg_bits - bit_start);
+                            cidr_octets[i] &= !((1 << shift) - 1);
+                        }
+                    }
+                    cidr_str = format!("{}/{}", Ipv6Addr::from(cidr_octets), deleg_bits);
+                }
+            }
+
+            if cfg.use_nftables && msg_type == 3 && !lease.ipv6.is_empty() {
+                fw.bind_mac_to_ipv6(&mac, &cidr_str);
+            }
 
             let offered_ipv6: Ipv6Addr = lease.ipv6.parse().unwrap_or(Ipv6Addr::UNSPECIFIED);
             let mut out = vec![if msg_type == 1 { 2 } else { 7 }]; 
@@ -147,7 +180,7 @@ pub async fn start_server(cfg: Arc<BridgeConfig>, storage: Arc<LeaseManager>) {
             out.extend_from_slice(&"2606:4700:4700::1111".parse::<Ipv6Addr>().unwrap().octets());
 
             let _ = socket.send_to(&out, peer).await;
-            log::info!("   🎉 [DHCPv6] {} para {}: {}", if msg_type == 1 {"ADVERTISE"} else {"REPLY"}, peer_ip, offered_ipv6);
+            log::info!("   🎉 [DHCPv6] {} para {}: {}", if msg_type == 1 {"ADVERTISE"} else {"REPLY"}, mac, offered_ipv6);
         }
     }
 }

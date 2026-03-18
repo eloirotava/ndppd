@@ -34,7 +34,11 @@ impl LeaseManager {
     pub fn set_lease(&self, id: &str, ipv4: String, ipv6: String) {
         let mut leases = self.leases.write().unwrap();
         // Atualiza apenas o que foi enviado, preservando o que já existia se necessário
-        let entry = leases.entry(id.to_string()).or_insert(Lease { ipv4: String::new(), ipv6: String::new() });
+        let entry = leases.entry(id.to_lowercase().to_string()).or_insert(Lease { 
+            ipv4: String::new(), 
+            ipv6: String::new() 
+        });
+        
         if !ipv4.is_empty() { entry.ipv4 = ipv4; }
         if !ipv6.is_empty() { entry.ipv6 = ipv6; }
 
@@ -44,6 +48,13 @@ impl LeaseManager {
     }
     
     pub fn get_lease(&self, id: &str) -> Option<Lease> {
-        self.leases.read().unwrap().get(id).cloned()
+        self.leases.read().unwrap().get(&id.to_lowercase()).cloned()
+    }
+
+    // ==========================================
+    // NOVO: Método para listar tudo no arranque
+    // ==========================================
+    pub fn get_all_leases(&self) -> HashMap<String, Lease> {
+        self.leases.read().unwrap().clone()
     }
 }
