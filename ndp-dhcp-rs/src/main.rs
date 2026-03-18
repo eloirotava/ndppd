@@ -29,7 +29,17 @@ async fn main() {
     let lease_manager = LeaseManager::new(&app_config.leases_file);
     
     let fw_manager = Arc::new(FirewallManager::new());
-    fw_manager.init_tables();
+    
+    // ====================================================================
+    // SEPARA AS INTERFACES GERENCIADAS PARA O FIREWALL
+    // ====================================================================
+    let mut managed_ifaces = Vec::new();
+    for b in &app_config.bridges {
+        if b.mode == "server" && b.use_nftables {
+            managed_ifaces.push(b.name.clone());
+        }
+    }
+    fw_manager.init_tables(&managed_ifaces);
 
     // ====================================================================
     // INICIALIZA O NAT CASO SOLICITADO NO CONF (SÓ PARA IPv4)
