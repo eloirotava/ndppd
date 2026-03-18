@@ -6,13 +6,10 @@ use rand::Rng;
 use crate::config::BridgeConfig;
 use crate::storage::LeaseManager;
 
-// Imports pnet para teste NDP nativo
 use pnet::datalink::{self, Channel};
 use pnet::packet::Packet;
 use pnet::packet::ethernet::{EtherTypes, EthernetPacket};
-use pnet::packet::icmpv6::{Icmpv6Types, Icmpv6Packet};
 
-/// Verifica se um IPv6 está em uso (Rust puro via inspeção de vizinhança)
 fn is_ipv6_in_use(iface_name: &str, target_ip: Ipv6Addr) -> bool {
     let interfaces = datalink::interfaces();
     let interface = interfaces.into_iter().find(|iface| iface.name == iface_name).expect("Interface erro");
@@ -22,14 +19,11 @@ fn is_ipv6_in_use(iface_name: &str, target_ip: Ipv6Addr) -> bool {
         _ => return false,
     };
 
-    // Em vez de enviar (complexo construir ICMPv6 NS bruto), escutamos por 200ms
-    // para ver se alguém já está anunciando esse IP.
     let start = std::time::Instant::now();
     while start.elapsed() < std::time::Duration::from_millis(200) {
         if let Ok(packet) = rx.next() {
             if let Some(eth) = EthernetPacket::new(packet) {
                 if eth.get_ethertype() == EtherTypes::Ipv6 {
-                    // Se virmos qualquer tráfego ICMPv6 vindo desse IP, ele está ocupado
                     if let Some(ipv6) = pnet::packet::ipv6::Ipv6Packet::new(eth.payload()) {
                         if ipv6.get_source() == target_ip {
                             return true;
@@ -93,12 +87,44 @@ pub async fn start_server(cfg: Arc<BridgeConfig>, storage: Arc<LeaseManager>) {
             let lease = storage.get_lease(&peer_ip).unwrap_or_else(|| {
                 let mut rng = rand::thread_rng();
                 let prefix_addr = cfg.ipv6_prefix.split('/').next().unwrap_or("::").parse::<Ipv6Addr>().unwrap_or(Ipv6Addr::UNSPECIFIED);
-                let mut octets = prefix_addr.octets();
-                let fixed_bytes = (cfg.ipv6_prefix_len / 8) as usize;
                 
                 let mut ip_str;
                 loop {
-                    for i in fixed_bytes..16 { octets[i] = rng.gen(); }
+                    let mut octets = prefix_addr.octets();
+                    let prefix_bits = cfg.ipv6_prefix_len as usize;
+                    let deleg_bits = cfg.ipv6_delegation_size as usize;
+                    
+                    let mut rand_bytes = [0u8; 16];
+                    rng.fill(&mut rand_bytes);
+
+                    // Matemática para calcular a subnet correta bit a bit
+                    for i in 0..16 {
+                        let bit_start = i * 8;
+                        let bit_end = bit_start + 8;
+                        
+                        if bit_end <= prefix_bits {
+                            // Mantém o prefixo base (não faz nada)
+                        } else if bit_start >= deleg_bits {
+                            // Área de host da subnet -> zera
+                            octets[i] = 0;
+                        } else {
+                            // Mistura: parte prefixo, parte subnet aleatória
+                            let mut mask = 0u8;
+                            let mut rand_mask = 0u8;
+                            for b in 0..8 {
+                                let bit_idx = bit_start + b;
+                                if bit_idx < prefix_bits { mask |= 1 << (7 - b); }
+                                else if bit_idx < deleg_bits { rand_mask |= 1 << (7 - b); }
+                            }
+                            octets[i] = (octets[i] & mask) | (rand_bytes[i] & rand_mask);
+                        }
+                    }
+
+                    // Se gerou uma subnet maior que /128, garante que entrega o primeiro IP (ex: ::1)
+                    if deleg_bits < 128 {
+                        octets[15] |= 1;
+                    }
+
                     let candidate = Ipv6Addr::from(octets);
                     ip_str = candidate.to_string();
                     if !is_ipv6_in_use(&cfg.name, candidate) { break; }

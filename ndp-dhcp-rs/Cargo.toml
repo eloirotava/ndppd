@@ -1,5 +1,5 @@
 [package]
-name = "ndp-dhcp-rs"
+name = "ndp-dhcp-nft-rs"
 version = "0.2.0"
 edition = "2021"
 

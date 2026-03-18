@@ -500,7 +500,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ndp-dhcp-rs"
+name = "ndp-dhcp-nft-rs"
 version = "0.2.0"
 dependencies = [
  "anyhow",
