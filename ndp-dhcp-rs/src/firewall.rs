@@ -20,7 +20,9 @@ impl FirewallManager {
     }
 
     pub fn init_tables(&self, managed_interfaces: &[String]) {
-        log::info!("🛡️ [Firewall] Inicializando Tabela L2 (bridge): {}", self.table);
+        log::info!("🛡️ [Firewall] Inicializando Tabela L2 (bridge) e L3 (inet) para Isolamento");
+        
+        // Criamos as tabelas para Anti-Spoofing (L2) e Filtro de Isolamento (L3)
         let mut ruleset = format!(
             "table bridge {} {{\n\
                 chain prerouting {{\n\
@@ -31,25 +33,55 @@ impl FirewallManager {
                 }}\n\
             }}\n\
             flush chain bridge {} prerouting\n\
-            flush chain bridge {} postrouting\n",
-            self.table, self.table, self.table
+            flush chain bridge {} postrouting\n\
+            table inet {}_filter {{\n\
+                chain input {{\n\
+                    type filter hook input priority 0; policy accept;\n\
+                }}\n\
+                chain forward {{\n\
+                    type filter hook forward priority 0; policy accept;\n\
+                }}\n\
+            }}\n\
+            flush chain inet {}_filter input\n\
+            flush chain inet {}_filter forward\n",
+            self.table, self.table, self.table, self.table, self.table, self.table
         );
 
         for iface in managed_interfaces {
-            // Usamos 'meta ibrname' (Input Bridge Name) para garantir que o tráfego 
-            // vindo de interfaces virtuais (veth) conectadas à bridge seja avaliado corretamente.
+            // ====================================================================
+            // 1. REGRAS L2 (Bridge) - ANTI-SPOOFING
+            // ====================================================================
             
-            // 1. Permitir DHCPv4 e DHCPv6 para que os clientes obtenham IP
+            // Permitir DHCPv4 e DHCPv6 para que os clientes obtenham IP
             ruleset.push_str(&format!("add rule bridge {} prerouting meta ibrname \"{}\" udp dport {{ 67, 547 }} accept\n", self.table, iface));
             
-            // 2. Permitir ICMPv6 (Essencial para Neighbor Discovery e funcionamento do IPv6)
+            // Permitir ICMPv6 (Essencial para Neighbor Discovery e funcionamento do IPv6)
             ruleset.push_str(&format!("add rule bridge {} prerouting meta ibrname \"{}\" ip6 nexthdr icmpv6 accept\n", self.table, iface));
 
-            // 3. Permitir ARP (Essencial para o IPv4 conseguir resolver MACs da rede)
+            // Permitir ARP (Essencial para o IPv4 conseguir resolver MACs da rede)
             ruleset.push_str(&format!("add rule bridge {} prerouting meta ibrname \"{}\" ether type arp accept\n", self.table, iface));
             
-            // 4. DROP final (Bloqueia tudo o resto que não deu match nas regras de topo ou exceções)
+            // DROP final (Bloqueia tudo o resto que não deu match nas regras de topo ou exceções L2)
             ruleset.push_str(&format!("add rule bridge {} prerouting meta ibrname \"{}\" drop\n", self.table, iface));
+
+            // ====================================================================
+            // 2. REGRAS L3 (Inet) - ISOLAMENTO (Acesso Restrito à Internet)
+            // ====================================================================
+            
+            // CHAIN INPUT: Protege os serviços que rodam no próprio HOST
+            // Permite APENAS pacotes essenciais para obter IP e resolver nomes
+            ruleset.push_str(&format!("add rule inet {}_filter input iifname \"{}\" udp dport {{ 53, 67, 547 }} accept\n", self.table, iface)); // DNS e DHCP
+            ruleset.push_str(&format!("add rule inet {}_filter input iifname \"{}\" tcp dport 53 accept\n", self.table, iface)); // DNS
+            ruleset.push_str(&format!("add rule inet {}_filter input iifname \"{}\" icmp type echo-request accept\n", self.table, iface)); // Ping IPv4
+            ruleset.push_str(&format!("add rule inet {}_filter input iifname \"{}\" ip6 nexthdr icmpv6 accept\n", self.table, iface)); // Ping/NDP IPv6
+            
+            // Dá DROP em qualquer outra tentativa de aceder ao host (ex: SSH, Portas de APIs)
+            ruleset.push_str(&format!("add rule inet {}_filter input iifname \"{}\" drop\n", self.table, iface));
+
+            // CHAIN FORWARD: Protege as outras máquinas e redes internas do servidor
+            // Bloqueia qualquer tráfego que tente ir para IPs Privados Locais (A tua rede interna)
+            ruleset.push_str(&format!("add rule inet {}_filter forward iifname \"{}\" ip daddr {{ 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 }} drop\n", self.table, iface));
+            ruleset.push_str(&format!("add rule inet {}_filter forward iifname \"{}\" ip6 daddr fc00::/7 drop\n", self.table, iface)); // Bloqueia redes ULA locais IPv6
         }
 
         self.apply(&ruleset);
